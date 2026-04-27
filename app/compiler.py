@@ -5,9 +5,19 @@ from openai import OpenAI
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+
 def compile_to_graph(text: str):
     prompt = f"""
-Convert this legal text into a JSON graph with nodes and edges.
+You are a legal decision compiler.
+
+Return ONLY valid JSON with this structure:
+
+{{
+  "nodes": [],
+  "edges": []
+}}
+
+No explanations. No text. Only JSON.
 
 Text:
 {text[:3000]}
@@ -19,14 +29,32 @@ Text:
         temperature=0
     )
 
-    content = response.choices[0].message.content
+    content = response.choices[0].message.content.strip()
 
-    graph = json.loads(content)
+    # 🧠 DEBUG PRINT (important)
+    print("LLM OUTPUT:", content)
 
-    for node in graph["nodes"]:
+    # 🛑 SAFETY CHECK
+    if not content:
+        raise Exception("LLM returned empty response")
+
+    # 🛠️ TRY TO FIX COMMON JSON ISSUES
+    try:
+        graph = json.loads(content)
+    except:
+        # attempt recovery if extra text exists
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start != -1 and end != -1:
+            graph = json.loads(content[start:end])
+        else:
+            raise Exception(f"Invalid JSON from LLM: {content}")
+
+    # assign UUIDs
+    for node in graph.get("nodes", []):
         node["node_id"] = str(uuid.uuid4())
 
-    for edge in graph["edges"]:
+    for edge in graph.get("edges", []):
         edge["edge_id"] = str(uuid.uuid4())
 
     return graph
