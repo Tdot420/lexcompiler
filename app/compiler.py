@@ -6,6 +6,9 @@ from openai import OpenAI
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
+# -------------------------
+# PDF EXTRACTION
+# -------------------------
 def extract_text_from_pdf(file_bytes):
     import fitz  # PyMuPDF
     text = ""
@@ -15,6 +18,9 @@ def extract_text_from_pdf(file_bytes):
     return text
 
 
+# -------------------------
+# HELPERS
+# -------------------------
 def normalize_id(text):
     return text.lower().replace(" ", "_").replace("-", "_")[:50]
 
@@ -27,14 +33,11 @@ def safe_json_load(content):
 
 
 def classify_node(label):
-    """
-    Heuristic classification fallback (model should do this, but we enforce consistency)
-    """
     label_lower = label.lower()
 
     claim_indicators = [
-        "must", "should", "is", "are", "exists", "can", "valid",
-        "holds", "required", "sound", "exhaustive"
+        "must", "should", "is", "are", "exists", "can",
+        "valid", "holds", "required", "sound", "exhaustive"
     ]
 
     if any(word in label_lower for word in claim_indicators):
@@ -43,6 +46,9 @@ def classify_node(label):
     return "FactorNode", "Factual"
 
 
+# -------------------------
+# MAIN COMPILER
+# -------------------------
 def compile_to_graph(text: str):
     prompt = f"""
 You are a legal reasoning compiler that converts text into a structured argument graph.
@@ -56,30 +62,22 @@ OUTPUT STRICT JSON:
 -------------------------
 NODE RULES
 -------------------------
-
 Each node must be:
-
-- ClaimNode (legal conclusion, assertion)
+- ClaimNode (legal assertion)
 - FactorNode (fact, definition, evidence)
-
-Assign:
-
-"type": "ClaimNode" or "FactorNode"
-"level": "Legal" (claims) or "Factual" (facts)
 
 -------------------------
 EDGE RULES (STRICT)
 -------------------------
-
 1. BAF_Support
    - FactorNode → ClaimNode
-   - ClaimNode → ClaimNode (ONLY if logically derived)
+   - ClaimNode → ClaimNode (only if logically derived)
 
 2. BAF_Attack
    - ClaimNode → ClaimNode
 
 3. ConditionalDependency
-   - ONLY FactorNode → FactorNode (true causal dependency)
+   - ONLY FactorNode → FactorNode
 
 4. ProceduralGate
    - Blocks a claim
@@ -87,16 +85,13 @@ EDGE RULES (STRICT)
 -------------------------
 CRITICAL CONSTRAINTS
 -------------------------
-
-- DO NOT connect everything
-- ONLY create edges where logically necessary
-- NO definition-to-definition edges
-- NO redundant edges
+- DO NOT overconnect nodes
+- ONLY include necessary edges
+- NO duplicate or meaningless edges
 
 -------------------------
 TEXT
 -------------------------
-
 {text}
 """
 
@@ -113,11 +108,11 @@ TEXT
     graph = safe_json_load(content)
 
     # -------------------------
-    # POST-PROCESSING SAFETY
+    # NODE PROCESSING
     # -------------------------
-
     nodes = []
     node_map = {}
+    label_to_id = {}
 
     for n in graph.get("nodes", []):
         label = n.get("label", "").strip()
@@ -143,16 +138,23 @@ TEXT
         }
 
         node_map[nid] = node
+        label_to_id[label] = nid
         nodes.append(node)
 
+    # -------------------------
+    # EDGE PROCESSING (FIXED)
+    # -------------------------
     edges = []
 
     for e in graph.get("edges", []):
-        source = normalize_id(e.get("source", ""))
-        target = normalize_id(e.get("target", ""))
+        source_label = e.get("source", "").strip()
+        target_label = e.get("target", "").strip()
 
-        if source not in node_map or target not in node_map:
+        if source_label not in label_to_id or target_label not in label_to_id:
             continue
+
+        source = label_to_id[source_label]
+        target = label_to_id[target_label]
 
         source_node = node_map[source]
         target_node = node_map[target]
@@ -160,9 +162,8 @@ TEXT
         relation = e.get("relation_type", "BAF_Support")
 
         # -------------------------
-        # ENFORCE EDGE VALIDITY
+        # VALIDATION
         # -------------------------
-
         valid = False
 
         if relation == "BAF_Support":
