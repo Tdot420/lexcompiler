@@ -44,7 +44,8 @@ def normalize_graph(graph):
         edge["relation_type"] = "ConditionalDependency"
         edge["logic_gate"] = "NoisyOR"
 
-    return graph
+graph = normalize_graph(graph)
+return graph
 
 
 def compile_to_graph(text: str):
