@@ -1,3 +1,11 @@
+import os
+import json
+import uuid
+from openai import OpenAI
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
 def compile_to_graph(text: str):
     prompt = f"""
 Return ONLY valid JSON.
@@ -7,8 +15,6 @@ Schema:
   "nodes": [],
   "edges": []
 }}
-
-Do not include explanations.
 
 Text:
 {text[:2000]}
@@ -29,16 +35,20 @@ Text:
 
     content = content.strip()
 
-    # attempt parse
     try:
         graph = json.loads(content)
-    except Exception:
-        # try to extract JSON
+    except:
         import re
         match = re.search(r"\{.*\}", content, re.DOTALL)
         if match:
             graph = json.loads(match.group())
         else:
             raise Exception(f"Invalid JSON from LLM: {content}")
+
+    for node in graph.get("nodes", []):
+        node["node_id"] = str(uuid.uuid4())
+
+    for edge in graph.get("edges", []):
+        edge["edge_id"] = str(uuid.uuid4())
 
     return graph
