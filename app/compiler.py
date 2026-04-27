@@ -23,16 +23,14 @@ def extract_text_from_pdf(file_bytes):
 # HELPERS
 # -------------------------
 def normalize_id(text):
-    return text.lower().replace(" ", "_").replace("-", "_")[:50]
+    base = text.lower().replace(" ", "_").replace("-", "_")[:40]
+    return f"{base}_{uuid.uuid4().hex[:6]}"
 
 
 def clean_json(content):
-    """
-    Removes ```json blocks and extracts raw JSON
-    """
     content = content.strip()
 
-    # Remove markdown ```json ```
+    # Remove markdown blocks
     if content.startswith("```"):
         content = re.sub(r"```json|```", "", content).strip()
 
@@ -55,13 +53,22 @@ def safe_json_load(content):
 def classify_node(label):
     label_lower = label.lower()
 
-    claim_indicators = [
-        "must", "should", "is", "are", "exists", "can",
-        "valid", "holds", "required", "sound", "exhaustive"
+    claim_patterns = [
+        "must", "should", "exists", "can",
+        "valid", "holds", "required",
+        "sound", "exhaustive", "proven"
     ]
 
-    if any(word in label_lower for word in claim_indicators):
+    factual_patterns = [
+        "theory", "properties", "definition",
+        "represents", "denotes", "is a", "are a"
+    ]
+
+    if any(word in label_lower for word in claim_patterns):
         return "ClaimNode", "Legal"
+
+    if any(word in label_lower for word in factual_patterns):
+        return "FactorNode", "Factual"
 
     return "FactorNode", "Factual"
 
@@ -106,10 +113,9 @@ TEXT:
     graph = safe_json_load(raw)
 
     # -------------------------
-    # FAILSAFE: ensure nodes exist
+    # FAILSAFE (fallback nodes)
     # -------------------------
     if not graph.get("nodes"):
-        # fallback: create nodes from sentences
         sentences = [s.strip() for s in text.split(".") if len(s.strip()) > 20]
 
         nodes = []
@@ -133,7 +139,7 @@ TEXT:
         return {"nodes": nodes, "edges": []}
 
     # -------------------------
-    # NORMAL PROCESSING
+    # NODE PROCESSING
     # -------------------------
     nodes = []
     node_map = {}
@@ -165,6 +171,9 @@ TEXT:
         label_to_id[label] = nid
         nodes.append(node)
 
+    # -------------------------
+    # EDGE PROCESSING
+    # -------------------------
     edges = []
 
     for e in graph.get("edges", []):
@@ -186,6 +195,20 @@ TEXT:
             "relation_type": e.get("relation_type", "BAF_Support"),
             "logic_gate": "NoisyOR"
         })
+
+    # -------------------------
+    # DEDUPLICATE EDGES
+    # -------------------------
+    seen = set()
+    unique_edges = []
+
+    for e in edges:
+        key = (e["source"], e["target"], e["relation_type"])
+        if key not in seen:
+            seen.add(key)
+            unique_edges.append(e)
+
+    edges = unique_edges
 
     return {
         "nodes": nodes,
