@@ -1,165 +1,83 @@
-import os
 import uuid
-import json
+import hashlib
 import re
-from openai import OpenAI
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-
-# -------------------------
-# PDF EXTRACTION
-# -------------------------
-def extract_text_from_pdf(file_bytes):
-    import fitz
-    text = ""
-    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
-        for page in doc:
-            text += page.get_text()
-    return text
+from typing import List, Dict
+from collections import defaultdict
 
 
-# -------------------------
-# HELPERS
-# -------------------------
-def normalize_id(text):
-    base = text.lower().replace(" ", "_").replace("-", "_")[:40]
-    return f"{base}_{uuid.uuid4().hex[:6]}"
+# -------------------------------
+# Helpers
+# -------------------------------
+
+def normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip())
 
 
-def clean_json(content):
-    content = content.strip()
-
-    # Remove markdown blocks
-    if content.startswith("```"):
-        content = re.sub(r"```json|```", "", content).strip()
-
-    # Extract JSON object
-    match = re.search(r"\{.*\}", content, re.DOTALL)
-    if match:
-        return match.group(0)
-
-    return content
+def generate_id(label: str) -> str:
+    """Generate deterministic short ID + uniqueness suffix"""
+    base = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+    short_hash = hashlib.md5(label.encode()).hexdigest()[:6]
+    return f"{base[:40]}_{short_hash}"
 
 
-def safe_json_load(content):
-    try:
-        cleaned = clean_json(content)
-        return json.loads(cleaned)
-    except Exception:
-        return {"nodes": [], "edges": []}
-
-
-def classify_node(label):
+def classify_node(label: str) -> Dict:
+    """Classify node type + level"""
     label_lower = label.lower()
 
-    claim_patterns = [
-        "must", "should", "exists", "can",
-        "valid", "holds", "required",
-        "sound", "exhaustive", "proven"
+    claim_keywords = [
+        "must", "can", "is", "are", "exists", "proven",
+        "constructed", "established", "delineates"
     ]
 
-    factual_patterns = [
-        "theory", "properties", "definition",
-        "represents", "denotes", "is a", "are a"
+    factual_keywords = [
+        "definition", "denotes", "represents", "means"
     ]
 
-    if any(word in label_lower for word in claim_patterns):
-        return "ClaimNode", "Legal"
+    if any(k in label_lower for k in factual_keywords):
+        return {"type": "ClaimNode", "level": "Factual"}
 
-    if any(word in label_lower for word in factual_patterns):
-        return "FactorNode", "Factual"
+    if any(k in label_lower for k in claim_keywords):
+        return {"type": "ClaimNode", "level": "Legal"}
 
-    return "FactorNode", "Factual"
+    return {"type": "ClaimNode", "level": "Factual"}
 
 
-# -------------------------
-# MAIN COMPILER
-# -------------------------
-def compile_to_graph(text: str):
+def extract_sentences(text: str) -> List[str]:
+    """Basic sentence splitting"""
+    raw = re.split(r"[.\n]+", text)
+    return [normalize_text(s) for s in raw if len(s.strip()) > 20]
 
-    if not text.strip():
-        return {"nodes": [], "edges": []}
 
-    prompt = f"""
-Convert the following text into a structured argument graph.
+# -------------------------------
+# Core Compiler
+# -------------------------------
 
-STRICT JSON ONLY. NO MARKDOWN.
+def compile_to_graph(text: str) -> Dict:
+    sentences = extract_sentences(text)
 
-FORMAT:
-{{
-  "nodes": [
-    {{"label": "...", "type": "ClaimNode or FactorNode"}}
-  ],
-  "edges": [
-    {{"source": "...", "target": "...", "relation_type": "BAF_Support"}}
-  ]
-}}
-
-TEXT:
-{text}
-"""
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0,
-        messages=[
-            {"role": "system", "content": "Return ONLY valid JSON."},
-            {"role": "user", "content": prompt}
-        ]
-    )
-
-    raw = response.choices[0].message.content
-    graph = safe_json_load(raw)
-
-    # -------------------------
-    # FAILSAFE (fallback nodes)
-    # -------------------------
-    if not graph.get("nodes"):
-        sentences = [s.strip() for s in text.split(".") if len(s.strip()) > 20]
-
-        nodes = []
-        for s in sentences[:10]:
-            nid = normalize_id(s)
-            node_type, level = classify_node(s)
-
-            nodes.append({
-                "id": nid,
-                "label": s,
-                "node_id": str(uuid.uuid4()),
-                "type": node_type,
-                "level": level,
-                "polarity": "Neutral",
-                "cpt_priors": {
-                    "state_true": 0.5,
-                    "state_false": 0.5
-                }
-            })
-
-        return {"nodes": nodes, "edges": []}
-
-    # -------------------------
-    # NODE PROCESSING
-    # -------------------------
     nodes = []
-    node_map = {}
-    label_to_id = {}
+    edges = []
 
-    for n in graph.get("nodes", []):
-        label = n.get("label", "").strip()
-        if not label:
+    node_lookup = {}
+    edge_set = set()
+
+    # -------------------------------
+    # Create Nodes
+    # -------------------------------
+    for sentence in sentences:
+        node_id_str = generate_id(sentence)
+
+        if node_id_str in node_lookup:
             continue
 
-        nid = normalize_id(label)
-
-        node_type, level = classify_node(label)
+        classification = classify_node(sentence)
 
         node = {
-            "id": nid,
-            "label": label,
+            "id": node_id_str,
+            "label": sentence,
             "node_id": str(uuid.uuid4()),
-            "type": n.get("type", node_type),
-            "level": n.get("level", level),
+            "type": classification["type"],
+            "level": classification["level"],
             "polarity": "Neutral",
             "cpt_priors": {
                 "state_true": 0.5,
@@ -167,50 +85,42 @@ TEXT:
             }
         }
 
-        node_map[nid] = node
-        label_to_id[label] = nid
+        node_lookup[node_id_str] = node
         nodes.append(node)
 
-    # -------------------------
-    # EDGE PROCESSING
-    # -------------------------
-    edges = []
+    # -------------------------------
+    # Create Edges (simple chain logic)
+    # -------------------------------
+    node_ids = list(node_lookup.keys())
 
-    for e in graph.get("edges", []):
-        source_label = e.get("source", "").strip()
-        target_label = e.get("target", "").strip()
+    for i in range(len(node_ids) - 1):
+        source = node_ids[i]
+        target = node_ids[i + 1]
 
-        if source_label not in label_to_id or target_label not in label_to_id:
+        edge_key = (source, target)
+
+        if edge_key in edge_set:
             continue
 
-        source = label_to_id[source_label]
-        target = label_to_id[target_label]
-
-        edges.append({
+        edge = {
             "source": source,
             "target": target,
             "edge_id": str(uuid.uuid4()),
-            "source_node_id": node_map[source]["node_id"],
-            "target_node_id": node_map[target]["node_id"],
-            "relation_type": e.get("relation_type", "BAF_Support"),
+            "source_node_id": node_lookup[source]["node_id"],
+            "target_node_id": node_lookup[target]["node_id"],
+            "relation_type": "BAF_Support",
             "logic_gate": "NoisyOR"
-        })
+        }
 
-    # -------------------------
-    # DEDUPLICATE EDGES
-    # -------------------------
-    seen = set()
-    unique_edges = []
+        edge_set.add(edge_key)
+        edges.append(edge)
 
-    for e in edges:
-        key = (e["source"], e["target"], e["relation_type"])
-        if key not in seen:
-            seen.add(key)
-            unique_edges.append(e)
-
-    edges = unique_edges
-
-    return {
+    # -------------------------------
+    # Final Graph
+    # -------------------------------
+    graph = {
         "nodes": nodes,
         "edges": edges
     }
+
+    return graph
