@@ -4,4 +4,4 @@ pydantic
 python-multipart
 openai
 pgmpy
-pymupdf==1.23.0
+pymupdf
