@@ -1,6 +1,7 @@
 import os
 import uuid
 import json
+import re
 from openai import OpenAI
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -10,7 +11,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # PDF EXTRACTION
 # -------------------------
 def extract_text_from_pdf(file_bytes):
-    import fitz  # PyMuPDF
+    import fitz
     text = ""
     with fitz.open(stream=file_bytes, filetype="pdf") as doc:
         for page in doc:
@@ -25,11 +26,30 @@ def normalize_id(text):
     return text.lower().replace(" ", "_").replace("-", "_")[:50]
 
 
+def clean_json(content):
+    """
+    Removes ```json blocks and extracts raw JSON
+    """
+    content = content.strip()
+
+    # Remove markdown ```json ```
+    if content.startswith("```"):
+        content = re.sub(r"```json|```", "", content).strip()
+
+    # Extract JSON object
+    match = re.search(r"\{.*\}", content, re.DOTALL)
+    if match:
+        return match.group(0)
+
+    return content
+
+
 def safe_json_load(content):
     try:
-        return json.loads(content)
+        cleaned = clean_json(content)
+        return json.loads(cleaned)
     except Exception:
-        raise ValueError(f"Invalid JSON returned from model:\n{content}")
+        return {"nodes": [], "edges": []}
 
 
 def classify_node(label):
@@ -50,48 +70,26 @@ def classify_node(label):
 # MAIN COMPILER
 # -------------------------
 def compile_to_graph(text: str):
-    prompt = f"""
-You are a legal reasoning compiler that converts text into a structured argument graph.
 
-OUTPUT STRICT JSON:
+    if not text.strip():
+        return {"nodes": [], "edges": []}
+
+    prompt = f"""
+Convert the following text into a structured argument graph.
+
+STRICT JSON ONLY. NO MARKDOWN.
+
+FORMAT:
 {{
-  "nodes": [...],
-  "edges": [...]
+  "nodes": [
+    {{"label": "...", "type": "ClaimNode or FactorNode"}}
+  ],
+  "edges": [
+    {{"source": "...", "target": "...", "relation_type": "BAF_Support"}}
+  ]
 }}
 
--------------------------
-NODE RULES
--------------------------
-Each node must be:
-- ClaimNode (legal assertion)
-- FactorNode (fact, definition, evidence)
-
--------------------------
-EDGE RULES (STRICT)
--------------------------
-1. BAF_Support
-   - FactorNode → ClaimNode
-   - ClaimNode → ClaimNode (only if logically derived)
-
-2. BAF_Attack
-   - ClaimNode → ClaimNode
-
-3. ConditionalDependency
-   - ONLY FactorNode → FactorNode
-
-4. ProceduralGate
-   - Blocks a claim
-
--------------------------
-CRITICAL CONSTRAINTS
--------------------------
-- DO NOT overconnect nodes
-- ONLY include necessary edges
-- NO duplicate or meaningless edges
-
--------------------------
-TEXT
--------------------------
+TEXT:
 {text}
 """
 
@@ -99,16 +97,43 @@ TEXT
         model="gpt-4o-mini",
         temperature=0,
         messages=[
-            {"role": "system", "content": "You output strict JSON only."},
+            {"role": "system", "content": "Return ONLY valid JSON."},
             {"role": "user", "content": prompt}
         ]
     )
 
-    content = response.choices[0].message.content.strip()
-    graph = safe_json_load(content)
+    raw = response.choices[0].message.content
+    graph = safe_json_load(raw)
 
     # -------------------------
-    # NODE PROCESSING
+    # FAILSAFE: ensure nodes exist
+    # -------------------------
+    if not graph.get("nodes"):
+        # fallback: create nodes from sentences
+        sentences = [s.strip() for s in text.split(".") if len(s.strip()) > 20]
+
+        nodes = []
+        for s in sentences[:10]:
+            nid = normalize_id(s)
+            node_type, level = classify_node(s)
+
+            nodes.append({
+                "id": nid,
+                "label": s,
+                "node_id": str(uuid.uuid4()),
+                "type": node_type,
+                "level": level,
+                "polarity": "Neutral",
+                "cpt_priors": {
+                    "state_true": 0.5,
+                    "state_false": 0.5
+                }
+            })
+
+        return {"nodes": nodes, "edges": []}
+
+    # -------------------------
+    # NORMAL PROCESSING
     # -------------------------
     nodes = []
     node_map = {}
@@ -119,7 +144,6 @@ TEXT
         if not label:
             continue
 
-        node_id = str(uuid.uuid4())
         nid = normalize_id(label)
 
         node_type, level = classify_node(label)
@@ -127,7 +151,7 @@ TEXT
         node = {
             "id": nid,
             "label": label,
-            "node_id": node_id,
+            "node_id": str(uuid.uuid4()),
             "type": n.get("type", node_type),
             "level": n.get("level", level),
             "polarity": "Neutral",
@@ -141,9 +165,6 @@ TEXT
         label_to_id[label] = nid
         nodes.append(node)
 
-    # -------------------------
-    # EDGE PROCESSING (FIXED)
-    # -------------------------
     edges = []
 
     for e in graph.get("edges", []):
@@ -156,47 +177,15 @@ TEXT
         source = label_to_id[source_label]
         target = label_to_id[target_label]
 
-        source_node = node_map[source]
-        target_node = node_map[target]
-
-        relation = e.get("relation_type", "BAF_Support")
-
-        # -------------------------
-        # VALIDATION
-        # -------------------------
-        valid = False
-
-        if relation == "BAF_Support":
-            if source_node["type"] == "FactorNode" and target_node["type"] == "ClaimNode":
-                valid = True
-            elif source_node["type"] == "ClaimNode" and target_node["type"] == "ClaimNode":
-                valid = True
-
-        elif relation == "BAF_Attack":
-            if source_node["type"] == "ClaimNode" and target_node["type"] == "ClaimNode":
-                valid = True
-
-        elif relation == "ConditionalDependency":
-            if source_node["type"] == "FactorNode" and target_node["type"] == "FactorNode":
-                valid = True
-
-        elif relation == "ProceduralGate":
-            valid = True
-
-        if not valid:
-            continue
-
-        edge = {
+        edges.append({
             "source": source,
             "target": target,
             "edge_id": str(uuid.uuid4()),
-            "source_node_id": source_node["node_id"],
-            "target_node_id": target_node["node_id"],
-            "relation_type": relation,
+            "source_node_id": node_map[source]["node_id"],
+            "target_node_id": node_map[target]["node_id"],
+            "relation_type": e.get("relation_type", "BAF_Support"),
             "logic_gate": "NoisyOR"
-        }
-
-        edges.append(edge)
+        })
 
     return {
         "nodes": nodes,
