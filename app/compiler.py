@@ -9,8 +9,7 @@ client = OpenAI()
 
 def compile_to_graph(text: str):
     """
-    Takes raw text and converts it into a structured graph
-    with classified legal nodes and edges.
+    Takes raw text and converts it into a structured legal reasoning graph.
     """
 
     prompt = f"""
@@ -18,30 +17,51 @@ Return ONLY valid JSON.
 
 You are analyzing legal or technical text and must extract a structured reasoning graph.
 
-CLASSIFY each node using:
+CLASSIFY each node using STRICT RULES:
 
-- type:
-  - FactorNode (facts or variables)
-  - ClaimNode (legal claims or conclusions)
-  - ToposNode (legal reasoning patterns, doctrines)
-  - ProceduralGateNode (timeliness, jurisdiction, standing)
+1. FactorNode (Factual level)
+   - Observable facts
+   - Definitions
+   - Variables
+   - Descriptions of systems
+   - Example: "A similarity network is a graphical model"
 
-- level:
-  - Factual
-  - Intermediate
-  - Legal
+2. ClaimNode (Legal level)
+   - Assertions that something is true
+   - Conclusions
+   - Theorems or legal claims
+   - Example: "The defendant breached the contract"
 
-- polarity:
-  - Plaintiff
-  - Defendant
-  - Neutral
+3. ToposNode (Intermediate level)
+   - Reasoning patterns
+   - Doctrines
+   - General principles
+   - Example: "If A implies B, and B implies C, then A implies C"
 
-Also classify relationships:
+4. ProceduralGateNode
+   - Timeliness
+   - Jurisdiction
+   - Standing
+   - Anything that blocks a claim procedurally
 
-- BAF_Support (supports another node)
-- BAF_Attack (attacks another node)
-- ConditionalDependency (causal/probabilistic)
-- ProceduralGate (blocks or enables)
+LEVEL RULES:
+
+- Factual → raw facts, definitions, variables
+- Intermediate → reasoning rules, structures
+- Legal → conclusions or assertions
+
+POLARITY RULES:
+
+- Plaintiff → supports a claim
+- Defendant → attacks a claim
+- Neutral → descriptive or unclear
+
+RELATION TYPES:
+
+- BAF_Support → supports another node
+- BAF_Attack → attacks another node
+- ConditionalDependency → causal/probabilistic relation
+- ProceduralGate → blocks or enables
 
 OUTPUT FORMAT:
 
@@ -91,19 +111,20 @@ TEXT:
     id_map = {}
 
     for node in nodes:
+        original_id = node.get("id", str(uuid.uuid4()))
         node_uuid = str(uuid.uuid4())
 
         normalized_node = {
-            "id": node.get("id"),
-            "label": node.get("label", node.get("id")),
+            "id": original_id,
+            "label": node.get("label", original_id),
             "node_id": node_uuid,
 
-            # ✅ NEW: classification fields
+            # ✅ classification fields (now meaningful)
             "type": node.get("type", "FactorNode"),
             "level": node.get("level", "Factual"),
             "polarity": node.get("polarity", "Neutral"),
 
-            # ✅ required for inference later
+            # ✅ probabilistic base (Phase 3 will refine this)
             "cpt_priors": {
                 "state_true": 0.5,
                 "state_false": 0.5
@@ -111,7 +132,7 @@ TEXT:
         }
 
         normalized_nodes.append(normalized_node)
-        id_map[node.get("id")] = node_uuid
+        id_map[original_id] = node_uuid
 
     # 🔹 Normalize edges
     normalized_edges = []
@@ -133,7 +154,7 @@ TEXT:
 
             "relation_type": edge.get("relation_type", "ConditionalDependency"),
 
-            # default logic gate (can upgrade later)
+            # default logic gate (can refine later)
             "logic_gate": "NoisyOR"
         }
 
